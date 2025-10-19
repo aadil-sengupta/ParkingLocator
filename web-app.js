@@ -1,8 +1,17 @@
 // ========== CONFIG ==========
-const GOOGLE_MAPS_API_KEY = "AIzaSyB7xkjnU8eFJhZ3G45_Wa6-QHay6XoGQYQ";
+const GOOGLE_MAPS_API_KEY = "AIzaSyAX5e_C12qVrkt1f5iRDnwWTX931KlomjI";
 
-// Parking meter data loaded from CSV
-let parkingData = [];
+const STATUS_STYLES = {
+  PAID: { color: '#ef4444', icon: 'P', label: 'Paid' },
+  FREE: { color: '#22c55e', icon: '✓', label: 'Free' },
+  TOW_AWAY: { color: '#f97316', icon: 'T', label: 'Tow-Away' },
+  UNKNOWN: { color: '#6b7280', icon: '?', label: 'Unknown' }
+};
+
+// Parking meter data loaded from CSV files
+let clustersData = [];
+let membersData = [];
+let clusterMap = new Map(); // cluster_id -> cluster data
 
 // Color handling for meter caps
 const KNOWN_CAP_COLORS = {
@@ -36,16 +45,20 @@ const FALLBACK_COLORS = [
 let capColorAssignments = new Map();
 let fallbackColorIndex = 0;
 
-const MIN_ZOOM_FOR_METERS = 15;
+const MIN_ZOOM_FOR_METERS = 18;
+const MIN_ZOOM_FOR_CLUSTERS = 12;
 const MAX_METERS_PER_VIEW = 500;
+const MAX_CLUSTERS_PER_VIEW = 200;
 const VIEWPORT_PADDING_RATIO = 0.1;
 
 let map, autocomplete, directionsService, directionsRenderer;
 let destinationMarker = null;
 let visibleMarkerMap = new Map();
+let visibleClusterMap = new Map();
 let nearestMarker = null;
 let currentRoute = null;
 let meterInfoWindow = null;
+let clusterInfoWindow = null;
 let zoomHintActive = false;
 let lastLimitedTotal = 0;
 
@@ -80,22 +93,49 @@ function showLoading(buttonId, isLoading) {
 async function loadParkingData(forceRefresh = false) {
   try {
     const cacheBuster = forceRefresh ? `?t=${Date.now()}` : '';
-    const response = await fetch(`output.csv${cacheBuster}`);
-    if (!response.ok) {
-      throw new Error(`Failed to fetch parking data: ${response.status} ${response.statusText}`);
+    
+    // Load both clusters and members
+    const [clustersResponse, membersResponse] = await Promise.all([
+      fetch(`clusters.csv${cacheBuster}`),
+      fetch(`members.csv${cacheBuster}`)
+    ]);
+
+    if (!clustersResponse.ok) {
+      throw new Error(`Failed to fetch clusters data: ${clustersResponse.status} ${clustersResponse.statusText}`);
+    }
+    if (!membersResponse.ok) {
+      throw new Error(`Failed to fetch members data: ${membersResponse.status} ${membersResponse.statusText}`);
     }
 
-    const csvText = await response.text();
-    parkingData = parseCsv(csvText)
-      .filter(entry => Number.isFinite(entry.lat) && Number.isFinite(entry.lng));
+    const [clustersText, membersText] = await Promise.all([
+      clustersResponse.text(),
+      membersResponse.text()
+    ]);
 
-    if (!parkingData.length) {
-      showWarning('No parking meter records were found in the data source.', 'error');
+    clustersData = parseCsv(clustersText)
+      .filter(entry => Number.isFinite(parseFloat(entry.centroid_latitude)) && Number.isFinite(parseFloat(entry.centroid_longitude)))
+      .filter(entry => !isMotorcycleParking(entry));
+    
+    membersData = parseCsv(membersText)
+      .filter(entry => Number.isFinite(parseFloat(entry.latitude)) && Number.isFinite(parseFloat(entry.longitude)));
+
+    // Build cluster lookup map
+    clusterMap = new Map();
+    clustersData.forEach(cluster => {
+      clusterMap.set(cluster.cluster_id, cluster);
+    });
+
+    lastLimitedTotal = 0;
+
+    if (!clustersData.length && !membersData.length) {
+      showWarning('No parking meter data was found in the data sources.', 'error');
     }
   } catch (error) {
     console.error('Error loading parking data:', error);
-    showWarning('Unable to load parking meter data. Please refresh or check the data file.', 'error');
-    parkingData = [];
+    showWarning('Unable to load parking meter data. Please refresh or check the data files.', 'error');
+    clustersData = [];
+    membersData = [];
+    clusterMap = new Map();
   }
 }
 
@@ -123,6 +163,21 @@ function parseCsv(text) {
     const lng = parseFloat(record.longitude ?? record.Longitude ?? record.lng ?? record.Lng ?? '');
     const capColorRaw = record.cap_color ?? record.capColor ?? '';
     const capColorDisplay = capColorRaw && typeof capColorRaw === 'string' ? capColorRaw.trim() : '';
+
+    // Handle cluster-specific fields
+    if (record.centroid_latitude) {
+      record.centroid_lat = parseFloat(record.centroid_latitude);
+    }
+    if (record.centroid_longitude) {
+      record.centroid_lng = parseFloat(record.centroid_longitude);
+    }
+    if (record.schedule_json) {
+      try {
+        record.parsed_schedule = JSON.parse(record.schedule_json);
+      } catch (e) {
+        record.parsed_schedule = null;
+      }
+    }
 
     const capColorDisplaySafe = capColorDisplay || 'Unknown';
     const timeLimitRaw = record.time_limit_min ?? record.timeLimit ?? '';
@@ -232,32 +287,45 @@ function getMarkerColor(capColorDisplay) {
   return color;
 }
 
-function buildMeterInfoContent(spot) {
-  const schedule = formatScheduleRange(spot);
-  const location = formatMeterLocation(spot);
-  const capColor = spot.capColorDisplay || 'Unknown';
-  const blockDetail = `<div class="meter-info-row"><strong>Block:</strong> ${formatBlockDetails(spot)}</div>`;
-  const meterType = spot.meter_type
-    ? `<div class="meter-info-row"><strong>Meter Type:</strong> ${spot.meter_type}</div>`
+function buildMeterInfoContent(data) {
+  const statusInfo = getCurrentStatus(data.cluster?.parsed_schedule);
+  const location = formatMeterLocation(data);
+  const scheduleHtml = data.cluster?.parsed_schedule 
+    ? `<div class="meter-info-row"><strong>Schedule:</strong>${formatClusterSchedule(data.cluster.parsed_schedule, 'details')}</div>`
     : '';
 
   return `
     <div class="meter-info-window">
-      <h4 class="meter-info-title">${formatMeterTitle(spot)}</h4>
-      <div class="meter-info-row"><strong>Meter ID:</strong> ${spot.post_id || 'N/A'}</div>
-  <div class="meter-info-row"><strong>Location:</strong> ${location}</div>
-  ${blockDetail}
-      <div class="meter-info-row"><strong>Cap Color:</strong> ${capColor}</div>
-      <div class="meter-info-row"><strong>Meter State:</strong> ${spot.meter_state || 'Unknown'}</div>
-      <div class="meter-info-row"><strong>Status:</strong> ${spot.active_meter_status || 'Unknown'}</div>
-      <div class="meter-info-row"><strong>Schedule:</strong> ${schedule}</div>
-      <div class="meter-info-row"><strong>Time Limit:</strong> ${spot.time_limit_min ? `${spot.time_limit_min} min` : 'Not posted'}</div>
-      ${meterType}
+      <h4 class="meter-info-title">${formatMeterTitle(data)}</h4>
+      <div class="meter-info-row">
+        <span class="status-badge status-${statusInfo.status.toLowerCase()}">${statusInfo.status}</span>
+        ${statusInfo.message}
+      </div>
+      <div class="meter-info-row"><strong>Location:</strong> ${location}</div>
+      <div class="meter-info-row"><strong>Meter ID:</strong> ${data.post_id || 'N/A'}</div>
+      <div class="meter-info-row"><strong>Cluster:</strong> ${data.cluster_id || 'N/A'}</div>
+      ${scheduleHtml}
     </div>
   `;
 }
 
-function updateColorKey() {
+function buildClusterInfoContent(cluster) {
+  const scheduleHtml = cluster.parsed_schedule 
+    ? formatClusterSchedule(cluster.parsed_schedule, 'details')
+    : 'Schedule not available';
+  
+  return `
+    <div class="meter-info-window">
+      <h4 class="meter-info-title">Parking Cluster: ${cluster.street_name_mode || 'Unknown'}</h4>
+      <div class="meter-info-row"><strong>Cluster ID:</strong> ${cluster.cluster_id || 'N/A'}</div>
+      <div class="meter-info-row"><strong>Meters:</strong> ${cluster.count_meters || 0}</div>
+      <div class="meter-info-row"><strong>Cap Color:</strong> ${cluster.cap_color_mode || 'Unknown'}</div>
+      <div class="meter-info-row"><strong>Street:</strong> ${cluster.street_name_mode || 'Unknown'}</div>
+      <div class="meter-info-row"><strong>Schedule:</strong> ${scheduleHtml}</div>
+      <div class="meter-info-row"><em>Click to zoom in for individual meters</em></div>
+    </div>
+  `;
+}function updateColorKey() {
   const container = document.getElementById('colorKey');
   if (!container) return;
 
@@ -284,29 +352,64 @@ function updateColorKey() {
   }
 }
 
-function formatMeterTitle(spot) {
-  if (spot.street_and_block) return spot.street_and_block;
-  const parts = [spot.street_num, spot.street_name].filter(Boolean);
-  if (parts.length) return parts.join(' ');
-  return spot.post_id ? `Meter ${spot.post_id}` : 'Parking Meter';
+function formatMeterTitle(data) {
+  if (data.street_name && data.street_num) {
+    return `${data.street_num} ${data.street_name}`;
+  }
+  if (data.street_name) return data.street_name;
+  return data.post_id ? `Meter ${data.post_id}` : 'Parking Meter';
 }
 
-function formatMeterLocation(spot) {
-  const parts = [spot.street_num, spot.street_name];
+function formatMeterLocation(data) {
+  const parts = [data.street_num, data.street_name];
   const primary = parts.filter(Boolean).join(' ');
   if (primary) return primary;
-  if (spot.street_and_block) return spot.street_and_block;
   return 'Location details unavailable';
 }
 
-function formatBlockDetails(spot) {
-  if (spot.street_and_block) {
-    return spot.block_side ? `${spot.street_and_block} (${spot.block_side})` : spot.street_and_block;
-  }
-  if (spot.block_side) {
-    return spot.block_side;
+function formatBlockDetails(data) {
+  if (data.blockface_id) {
+    return data.blockface_id;
   }
   return 'Not specified';
+}
+
+function formatClusterSchedule(scheduleArray, format = 'summary') {
+  if (!Array.isArray(scheduleArray) || !scheduleArray.length) {
+    return 'No schedule available';
+  }
+
+  if (format === 'details') {
+    const dayOrder = ['Mo', 'Tu', 'We', 'Th', 'Fr', 'Sa', 'Su'];
+    const grouped = {};
+
+    scheduleArray.forEach(rule => {
+      const key = `${rule.from_time}-${rule.to_time}-${rule.meter_state}`;
+      if (!grouped[key]) {
+        grouped[key] = { ...rule, days: new Set() };
+      }
+      rule.days.split(',').forEach(day => grouped[key].days.add(day.trim()));
+    });
+
+    return Object.values(grouped)
+      .map(rule => {
+        const sortedDays = Array.from(rule.days).sort((a, b) => dayOrder.indexOf(a) - dayOrder.indexOf(b));
+        const days = sortedDays.join(', ');
+        const limit = rule.time_limit_min ? ` (${rule.time_limit_min} min)` : '';
+        const state = rule.meter_state || '';
+        return `<div class="schedule-rule-line">${days}: ${rule.from_time} - ${rule.to_time} [${state}${limit}]</div>`;
+      })
+      .join('');
+  }
+
+  // Summary format
+  return scheduleArray.map(sched => {
+    const days = sched.days || '';
+    const from = sched.from_time || '';
+    const to = sched.to_time || '';
+    const limit = sched.time_limit_min ? ` (${sched.time_limit_min} min limit)` : '';
+    return `${days}: ${from}-${to}${limit}`;
+  }).join('; ');
 }
 
 function formatScheduleRange(spot) {
@@ -392,9 +495,11 @@ async function initMap() {
     });
 
     meterInfoWindow = new google.maps.InfoWindow();
+    clusterInfoWindow = new google.maps.InfoWindow();
 
     await loadParkingData();
-    placeParkingSpots();
+  renderMetersForViewport();
+  map.addListener('idle', () => renderMetersForViewport());
     setupUI();
     initializeDateTime();
     handleResponsive();
@@ -438,6 +543,8 @@ function setupUI() {
   document.getElementById('useLocationBtn')?.addEventListener('click', () => useCurrentLocation(false));
   document.getElementById('resetBtn')?.addEventListener('click', () => resetAll(false));
   document.getElementById('directionsBtn')?.addEventListener('click', showDirections);
+  document.getElementById('startTime').addEventListener('change', renderMetersForViewport);
+  document.getElementById('endTime').addEventListener('change', renderMetersForViewport);
 
   // Mobile event listeners
   document.getElementById('mobileMenuBtn')?.addEventListener('click', toggleMobilePanel);
@@ -445,6 +552,8 @@ function setupUI() {
   document.getElementById('mobileUseLocationBtn')?.addEventListener('click', () => useCurrentLocation(true));
   document.getElementById('mobileResetBtn')?.addEventListener('click', () => resetAll(true));
   document.getElementById('mobileDirectionsBtn')?.addEventListener('click', showDirections);
+  document.getElementById('mobileStartTime').addEventListener('change', renderMetersForViewport);
+  document.getElementById('mobileEndTime').addEventListener('change', renderMetersForViewport);
 
   // Quick action buttons
   document.getElementById('locationBtn').addEventListener('click', () => useCurrentLocation(isMobileView));
@@ -494,23 +603,24 @@ function initializeDateTime() {
   }
 }
 
-function renderMetersForViewport(force = false) {
+function renderMetersForViewport() {
   if (!map) return;
 
-  if (!Array.isArray(parkingData) || !parkingData.length) {
-    clearVisibleMarkers();
-    updateColorKey();
-    return;
-  }
+  capColorAssignments = new Map();
+  fallbackColorIndex = 0;
 
   const zoom = map.getZoom();
   if (typeof zoom !== 'number') return;
 
-  if (zoom < MIN_ZOOM_FOR_METERS) {
-    clearVisibleMarkers();
+  // Clear existing markers
+  clearVisibleMarkers();
+  clearVisibleClusters();
+
+  if (zoom < MIN_ZOOM_FOR_CLUSTERS) {
     updateColorKey();
+    lastLimitedTotal = 0;
     if (!zoomHintActive) {
-      showWarning(`Zoom in (≥ ${MIN_ZOOM_FOR_METERS}) to view parking meters.`);
+      showWarning(`Zoom in (≥ ${MIN_ZOOM_FOR_CLUSTERS}) to view parking clusters.`);
       zoomHintActive = true;
     }
     return;
@@ -519,6 +629,38 @@ function renderMetersForViewport(force = false) {
   if (zoomHintActive) {
     zoomHintActive = false;
   }
+
+  const refTime = getReferenceTime();
+
+  if (zoom >= MIN_ZOOM_FOR_METERS) {
+    renderIndividualMeters(refTime);
+  } else {
+    renderClusterCentroids(refTime);
+  }
+
+  updateColorKey();
+}
+
+function isMotorcycleParking(cluster) {
+  if (!cluster.parsed_schedule || !Array.isArray(cluster.parsed_schedule)) {
+    return false;
+  }
+  
+  return cluster.parsed_schedule.some(rule => {
+    const meterState = (rule.meter_state || '').toLowerCase();
+    return meterState.includes('motorcycle');
+  });
+}
+
+function getReferenceTime() {
+  const isMobile = window.innerWidth <= 768;
+  const startTimeInput = document.getElementById(isMobile ? 'mobileStartTime' : 'startTime');
+  const timeValue = startTimeInput.value;
+  return timeValue ? new Date(timeValue) : new Date();
+}
+
+function renderIndividualMeters(refTime = new Date()) {
+  if (!Array.isArray(membersData) || !membersData.length) return;
 
   const bounds = map.getBounds();
   if (!bounds) return;
@@ -530,21 +672,23 @@ function renderMetersForViewport(force = false) {
   const candidates = [];
   let totalInBounds = 0;
 
-  parkingData.forEach(spot => {
-    if (!Number.isFinite(spot.lat) || !Number.isFinite(spot.lng)) return;
-    const position = new google.maps.LatLng(spot.lat, spot.lng);
+  membersData.forEach(member => {
+    const lat = parseFloat(member.latitude);
+    const lng = parseFloat(member.longitude);
+    if (!Number.isFinite(lat) || !Number.isFinite(lng)) return;
+    
+    const position = new google.maps.LatLng(lat, lng);
     if (searchBounds.contains(position)) {
       totalInBounds += 1;
       const distanceToCenter = centerPoint
-        ? haversine(centerPoint, { lat: spot.lat, lng: spot.lng })
+        ? haversine(centerPoint, { lat, lng })
         : 0;
-      candidates.push({ spot, position, distanceToCenter });
+      candidates.push({ member, position, distanceToCenter, lat, lng });
     }
   });
 
   if (!candidates.length) {
-    clearVisibleMarkers();
-    updateColorKey();
+    lastLimitedTotal = 0;
     return;
   }
 
@@ -563,15 +707,14 @@ function renderMetersForViewport(force = false) {
     lastLimitedTotal = 0;
   }
 
-  capColorAssignments = new Map();
-  fallbackColorIndex = 0;
-
   const keepKeys = new Set();
 
-  candidates.forEach(({ spot, position }) => {
-    const key = getSpotKey(spot);
-    const color = getMarkerColor(spot.capColorDisplay);
-    const icon = buildMeterIcon(color);
+  candidates.forEach(({ member, position, lat, lng }) => {
+    const key = getMemberKey(member);
+    const cluster = clusterMap.get(member.cluster_id);
+    const statusInfo = getCurrentStatus(cluster?.parsed_schedule, refTime);
+    const style = STATUS_STYLES[statusInfo.status] || STATUS_STYLES.UNKNOWN;
+    const icon = buildMeterIcon(style.color, style.icon);
 
     keepKeys.add(key);
 
@@ -579,19 +722,20 @@ function renderMetersForViewport(force = false) {
     if (marker) {
       marker.setPosition(position);
       marker.setIcon(icon);
-      marker.setTitle(`Meter ${spot.post_id || ''}`.trim());
+      marker.setTitle(`Meter ${member.post_id || ''} - ${statusInfo.label}`.trim());
     } else {
       marker = new google.maps.Marker({
         position,
         map,
-        title: `Meter ${spot.post_id || ''}`.trim(),
+        title: `Meter ${member.post_id || ''} - ${statusInfo.label}`.trim(),
         icon
       });
       marker.addListener('click', () => handleMeterClick(marker));
       visibleMarkerMap.set(key, marker);
     }
 
-    marker.meterData = spot;
+    // Enrich member data with cluster info
+    marker.meterData = { ...member, lat, lng, cluster };
     if (!marker.getMap()) {
       marker.setMap(map);
     }
@@ -603,13 +747,110 @@ function renderMetersForViewport(force = false) {
       visibleMarkerMap.delete(key);
     }
   });
+}
 
-  updateColorKey();
+function renderClusterCentroids(refTime = new Date()) {
+  if (!Array.isArray(clustersData) || !clustersData.length) return;
+
+  const bounds = map.getBounds();
+  if (!bounds) return;
+
+  const searchBounds = expandBounds(bounds, VIEWPORT_PADDING_RATIO);
+  const center = map.getCenter();
+  const centerPoint = center ? { lat: center.lat(), lng: center.lng() } : null;
+
+  const candidates = [];
+  let totalInBounds = 0;
+
+  clustersData.forEach(cluster => {
+    const lat = parseFloat(cluster.centroid_latitude);
+    const lng = parseFloat(cluster.centroid_longitude);
+    if (!Number.isFinite(lat) || !Number.isFinite(lng)) return;
+    
+    const position = new google.maps.LatLng(lat, lng);
+    if (searchBounds.contains(position)) {
+      totalInBounds += 1;
+      const distanceToCenter = centerPoint
+        ? haversine(centerPoint, { lat, lng })
+        : 0;
+      candidates.push({ cluster, position, distanceToCenter, lat, lng });
+    }
+  });
+
+  if (!candidates.length) {
+    lastLimitedTotal = 0;
+    return;
+  }
+
+  candidates.sort((a, b) => a.distanceToCenter - b.distanceToCenter);
+
+  let limited = false;
+  if (candidates.length > MAX_CLUSTERS_PER_VIEW) {
+    candidates.length = MAX_CLUSTERS_PER_VIEW;
+    limited = true;
+  }
+
+  if (limited && totalInBounds !== lastLimitedTotal) {
+    showWarning(`Showing ${MAX_CLUSTERS_PER_VIEW} of ${totalInBounds} clusters. Zoom in for individual meters.`);
+    lastLimitedTotal = totalInBounds;
+  } else if (!limited) {
+    lastLimitedTotal = 0;
+  }
+
+  const keepKeys = new Set();
+
+  candidates.forEach(({ cluster, position, lat, lng }) => {
+    const key = getClusterKey(cluster);
+    const statusInfo = getCurrentStatus(cluster.parsed_schedule, refTime);
+    const style = STATUS_STYLES[statusInfo.status] || STATUS_STYLES.UNKNOWN;
+    const icon = buildClusterIcon(style.color, parseInt(cluster.count_meters) || 1);
+
+    keepKeys.add(key);
+
+    let marker = visibleClusterMap.get(key);
+    if (marker) {
+      marker.setPosition(position);
+      marker.setIcon(icon);
+      marker.setTitle(`${cluster.count_meters} meters - ${cluster.street_name_mode || 'Unknown'} - ${statusInfo.label}`.trim());
+    } else {
+      marker = new google.maps.Marker({
+        position,
+        map,
+        title: `${cluster.count_meters} meters - ${cluster.street_name_mode || 'Unknown'} - ${statusInfo.label}`.trim(),
+        icon
+      });
+      marker.addListener('click', () => handleClusterClick(marker));
+      visibleClusterMap.set(key, marker);
+    }
+
+    marker.clusterData = { ...cluster, lat, lng };
+    if (!marker.getMap()) {
+      marker.setMap(map);
+    }
+  });
+
+  visibleClusterMap.forEach((marker, key) => {
+    if (!keepKeys.has(key)) {
+      marker.setMap(null);
+      visibleClusterMap.delete(key);
+    }
+  });
 }
 
 function clearVisibleMarkers() {
   visibleMarkerMap.forEach(marker => marker.setMap(null));
   visibleMarkerMap.clear();
+  if (meterInfoWindow) {
+    meterInfoWindow.close();
+  }
+}
+
+function clearVisibleClusters() {
+  visibleClusterMap.forEach(marker => marker.setMap(null));
+  visibleClusterMap.clear();
+  if (clusterInfoWindow) {
+    clusterInfoWindow.close();
+  }
 }
 
 function expandBounds(bounds, ratio = 0.1) {
@@ -630,29 +871,53 @@ function expandBounds(bounds, ratio = 0.1) {
   return expanded;
 }
 
-function buildMeterIcon(color) {
+function buildMeterIcon(color, label) {
   return {
     path: google.maps.SymbolPath.CIRCLE,
-    scale: 7,
+    scale: 8,
     fillColor: color,
-    fillOpacity: 0.9,
+    fillOpacity: 1,
     strokeColor: '#ffffff',
-    strokeWeight: 2
+    strokeWeight: 2,
+    labelOrigin: new google.maps.Point(0, 0.5)
   };
 }
 
-function getSpotKey(spot) {
-  if (!spot) return '';
-  return spot.post_id || spot.blockface_id || `${spot.lat},${spot.lng}`;
+function buildClusterIcon(color, count) {
+  const scale = Math.min(Math.max(10 + Math.log(count) * 2.5, 10), 22);
+  return {
+    path: google.maps.SymbolPath.CIRCLE,
+    scale: scale,
+    fillColor: color,
+    fillOpacity: 0.8,
+    strokeColor: '#ffffff',
+    strokeWeight: 3,
+    label: {
+      text: String(count),
+      color: 'white',
+      fontSize: `${Math.max(scale * 0.6, 9)}px`,
+      fontWeight: 'bold',
+    }
+  };
+}
+
+function getMemberKey(member) {
+  if (!member) return '';
+  return member.post_id || member.blockface_id || `${member.latitude},${member.longitude}`;
+}
+
+function getClusterKey(cluster) {
+  if (!cluster) return '';
+  return cluster.cluster_id || `${cluster.centroid_latitude},${cluster.centroid_longitude}`;
 }
 
 function handleMeterClick(marker) {
   if (!marker) return;
-  const spot = marker.meterData;
-  if (!spot) return;
+  const data = marker.meterData;
+  if (!data) return;
 
   if (meterInfoWindow) {
-    meterInfoWindow.setContent(buildMeterInfoContent(spot));
+    meterInfoWindow.setContent(buildMeterInfoContent(data));
     meterInfoWindow.open(map, marker);
   }
 
@@ -664,7 +929,7 @@ function handleMeterClick(marker) {
     const destPos = destinationMarker.getPosition();
     if (destPos) {
       const destination = { lat: destPos.lat(), lng: destPos.lng() };
-      distanceToDestination = haversine(destination, { lat: spot.lat, lng: spot.lng });
+      distanceToDestination = haversine(destination, { lat: data.lat, lng: data.lng });
       walkMinutes = Math.ceil(distanceToDestination / 83.33);
       destinationName = destinationMarker.getTitle ? destinationMarker.getTitle() : destinationName;
     }
@@ -674,7 +939,7 @@ function handleMeterClick(marker) {
   const startInput = document.getElementById(isMobile ? 'mobileStartTime' : 'startTime');
   const endInput = document.getElementById(isMobile ? 'mobileEndTime' : 'endTime');
 
-  displayParkingResults(spot, {
+  displayParkingResults(data, {
     isMobile,
     distanceMeters: distanceToDestination,
     walkMinutes,
@@ -682,6 +947,24 @@ function handleMeterClick(marker) {
     startTime: startInput?.value || null,
     endTime: endInput?.value || null
   });
+}
+
+function handleClusterClick(marker) {
+  if (!marker) return;
+  const cluster = marker.clusterData;
+  if (!cluster) return;
+
+  if (clusterInfoWindow) {
+    clusterInfoWindow.setContent(buildClusterInfoContent(cluster));
+    clusterInfoWindow.open(map, marker);
+  }
+
+  // Zoom in to show individual meters
+  const zoom = map.getZoom();
+  if (zoom < MIN_ZOOM_FOR_METERS) {
+    map.setCenter({ lat: cluster.lat, lng: cluster.lng });
+    map.setZoom(MIN_ZOOM_FOR_METERS);
+  }
 }
 
 function findNearestParking(isMobile = false) {
@@ -695,7 +978,7 @@ function findNearestParking(isMobile = false) {
   const startTime = document.getElementById(startTimeId).value;
   const endTime = document.getElementById(endTimeId).value;
 
-  if (!parkingData.length) {
+  if (!membersData.length) {
     showWarning('Parking meter data is still loading. Please try again in a moment.');
     return;
   }
@@ -743,20 +1026,21 @@ function processDestination(destination, destinationName, startTime, endTime, is
   let bestSpot = null;
   let bestDistance = Infinity;
 
-  parkingData.forEach(spot => {
-    if (!Number.isFinite(spot.lat) || !Number.isFinite(spot.lng)) return;
-    const isActiveMeter = (spot.active_meter_status || '').toLowerCase().includes('active');
-    if (!isActiveMeter) return;
+  membersData.forEach(member => {
+    const lat = parseFloat(member.latitude);
+    const lng = parseFloat(member.longitude);
+    if (!Number.isFinite(lat) || !Number.isFinite(lng)) return;
 
-    const distance = haversine(destination, { lat: spot.lat, lng: spot.lng });
+    const distance = haversine(destination, { lat, lng });
     if (distance < bestDistance) {
-      bestSpot = spot;
+      const cluster = clusterMap.get(member.cluster_id);
+      bestSpot = { ...member, lat, lng, cluster };
       bestDistance = distance;
     }
   });
 
   if (!bestSpot) {
-    showWarning('No active parking meters found near your destination.');
+    showWarning('No parking meters found near your destination.');
     return;
   }
 
@@ -777,20 +1061,8 @@ function processDestination(destination, destinationName, startTime, endTime, is
   });
 
   const walkMinutes = Math.ceil(bestDistance / 83.33);
-
-  nearestMarker.addListener('click', () => {
-    if (!meterInfoWindow) return;
-    meterInfoWindow.setContent(buildMeterInfoContent(bestSpot));
-    meterInfoWindow.open(map, nearestMarker);
-    displayParkingResults(bestSpot, {
-      distanceMeters: bestDistance,
-      walkMinutes,
-      destinationName,
-      isMobile,
-      startTime,
-      endTime
-    });
-  });
+  nearestMarker.meterData = bestSpot;
+  nearestMarker.addListener('click', () => handleMeterClick(nearestMarker));
 
   const focusBounds = new google.maps.LatLngBounds();
   focusBounds.extend(destination);
@@ -844,16 +1116,20 @@ function displayParkingResults(spot, options = {}) {
     ? `<p><strong>Your parking window:</strong> ${formatUserTimeRange(startTime, endTime)}</p>`
     : '';
 
+  const schedule = spot.cluster?.parsed_schedule 
+    ? formatClusterSchedule(spot.cluster.parsed_schedule)
+    : 'Schedule not available';
+
   parkingDetails.innerHTML = `
     <div class="parking-info">
       <h3>�️ ${formatMeterTitle(spot)}</h3>
       <p><strong>Meter ID:</strong> ${spot.post_id || 'N/A'}</p>
       <p><strong>Location:</strong> ${formatMeterLocation(spot)}</p>
   <p><strong>Block:</strong> ${formatBlockDetails(spot)}</p>
-      <p><strong>Cap Color:</strong> ${spot.capColorDisplay || 'Unknown'}</p>
+      <p><strong>Cap Color:</strong> ${spot.cap_color || 'Unknown'}</p>
       <p><strong>Meter State:</strong> ${spot.meter_state || 'Unknown'}</p>
       <p><strong>Status:</strong> ${spot.active_meter_status || 'Unknown'}</p>
-      <p><strong>Schedule:</strong> ${formatScheduleRange(spot)}</p>
+      <p><strong>Schedule:</strong> ${schedule}</p>
       <p><strong>Time Limit:</strong> ${spot.time_limit_min ? `${spot.time_limit_min} minutes` : 'Not posted'}</p>
       <p><strong>Rule:</strong> ${spot.applied_rule || 'N/A'}</p>
       <p><strong>Meter Type:</strong> ${spot.meter_type || 'N/A'}</p>
@@ -953,7 +1229,7 @@ async function refreshParkingSpots() {
 
   try {
     await loadParkingData(true);
-    renderMetersForViewport(true);
+    renderMetersForViewport();
     showWarning('Parking meter data refreshed.');
   } catch (error) {
     console.error('Refresh failed:', error);
@@ -997,29 +1273,50 @@ function resetAll(isMobile = false) {
   document.getElementById('warning').style.display = 'none';
   
   // Reset map view
-  if (visibleMarkerMap.size) {
+  if (visibleMarkerMap.size || visibleClusterMap.size) {
     const bounds = new google.maps.LatLngBounds();
+    let hasPosition = false;
+    
     visibleMarkerMap.forEach(marker => {
       if (typeof marker.getPosition === 'function') {
         const pos = marker.getPosition();
-        if (pos) bounds.extend(pos);
+        if (pos) {
+          bounds.extend(pos);
+          hasPosition = true;
+        }
       }
     });
-    if (!bounds.isEmpty()) {
+    
+    visibleClusterMap.forEach(marker => {
+      if (typeof marker.getPosition === 'function') {
+        const pos = marker.getPosition();
+        if (pos) {
+          bounds.extend(pos);
+          hasPosition = true;
+        }
+      }
+    });
+    
+    if (hasPosition && !bounds.isEmpty()) {
       map.fitBounds(bounds);
-      if (map.getZoom() < MIN_ZOOM_FOR_METERS) {
-        map.setZoom(MIN_ZOOM_FOR_METERS);
+      if (map.getZoom() < MIN_ZOOM_FOR_CLUSTERS) {
+        map.setZoom(MIN_ZOOM_FOR_CLUSTERS);
       }
     }
-  } else if (parkingData.length) {
-    const first = parkingData.find(entry => Number.isFinite(entry.lat) && Number.isFinite(entry.lng));
-    if (first) {
-      map.setCenter({ lat: first.lat, lng: first.lng });
+  } else if (membersData.length || clustersData.length) {
+    const firstMember = membersData.find(entry => Number.isFinite(parseFloat(entry.latitude)) && Number.isFinite(parseFloat(entry.longitude)));
+    const firstCluster = clustersData.find(entry => Number.isFinite(parseFloat(entry.centroid_latitude)) && Number.isFinite(parseFloat(entry.centroid_longitude)));
+    
+    if (firstMember) {
+      map.setCenter({ lat: parseFloat(firstMember.latitude), lng: parseFloat(firstMember.longitude) });
       map.setZoom(MIN_ZOOM_FOR_METERS);
+    } else if (firstCluster) {
+      map.setCenter({ lat: parseFloat(firstCluster.centroid_latitude), lng: parseFloat(firstCluster.centroid_longitude) });
+      map.setZoom(MIN_ZOOM_FOR_CLUSTERS);
     }
   }
 
-  renderMetersForViewport(true);
+  renderMetersForViewport();
   
   initializeDateTime();
 }

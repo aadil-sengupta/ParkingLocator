@@ -1,5 +1,4 @@
 // ========== CONFIG ==========
-const GOOGLE_MAPS_API_KEY = "AIzaSyB7xkjnU8eFJhZ3G45_Wa6-QHay6XoGQYQ"; // user's key inserted
 
 // Parking spots data (enhanced with additional info)
 const PARKING_SPOTS = [
