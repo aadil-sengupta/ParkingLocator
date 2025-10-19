@@ -1087,6 +1087,7 @@ function processDestination(destination, destinationName, startTime, endTime, is
   });
 
   // Find nearest available parking spot
+  const refTime = getReferenceTime();
   let bestSpot = null;
   let bestDistance = Infinity;
 
@@ -1095,16 +1096,26 @@ function processDestination(destination, destinationName, startTime, endTime, is
     const lng = parseFloat(member.longitude);
     if (!Number.isFinite(lat) || !Number.isFinite(lng)) return;
 
+    const cluster = clusterMap.get(member.cluster_id);
+    const statusInfo = getCurrentStatus(cluster?.parsed_schedule, refTime);
+
+    // Adhere to the active filter when finding the nearest spot
+    if (!shouldShowMarker(statusInfo)) {
+      return;
+    }
+
     const distance = haversine(destination, { lat, lng });
     if (distance < bestDistance) {
-      const cluster = clusterMap.get(member.cluster_id);
       bestSpot = { ...member, lat, lng, cluster };
       bestDistance = distance;
     }
   });
 
   if (!bestSpot) {
-    showWarning('No parking meters found near your destination.');
+    const message = activeFilter === 'free' 
+      ? 'No free parking meters found near your destination.' 
+      : 'No parking meters found near your destination.';
+    showWarning(message);
     return;
   }
 
@@ -1151,7 +1162,10 @@ function processDestination(destination, destinationName, startTime, endTime, is
   
   // Enable directions button
   const directionsBtn = document.getElementById(isMobile ? 'mobileDirectionsBtn' : 'directionsBtn');
-  if (directionsBtn) directionsBtn.disabled = false;
+  if (directionsBtn) {
+    selectedMeterData = bestSpot; // Set the found spot as the selected one for directions
+    directionsBtn.disabled = false;
+  }
 }
 
 function displayParkingResults(spot, options = {}) {
