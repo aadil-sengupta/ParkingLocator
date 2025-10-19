@@ -58,6 +58,7 @@ let visibleClusterMap = new Map();
 let nearestMarker = null;
 let currentRoute = null;
 let meterInfoWindow = null;
+let selectedMeterData = null;
 let clusterInfoWindow = null;
 let zoomHintActive = false;
 let lastLimitedTotal = 0;
@@ -66,6 +67,7 @@ let lastLimitedTotal = 0;
 let isSidebarCollapsed = false;
 let isMobilePanelExpanded = false;
 let isMobileView = window.innerWidth <= 768;
+let activeFilter = 'all'; // 'all', 'free', 'paid'
 
 // Utility functions
 function showWarning(msg, type = 'warning') {
@@ -545,6 +547,11 @@ function setupUI() {
   document.getElementById('directionsBtn')?.addEventListener('click', showDirections);
   document.getElementById('startTime').addEventListener('change', renderMetersForViewport);
   document.getElementById('endTime').addEventListener('change', renderMetersForViewport);
+  
+  // Desktop filter buttons
+  document.getElementById('showAllBtn')?.addEventListener('click', () => setFilter('all', false));
+  document.getElementById('showFreeBtn')?.addEventListener('click', () => setFilter('free', false));
+  document.getElementById('showPaidBtn')?.addEventListener('click', () => setFilter('paid', false));
 
   // Mobile event listeners
   document.getElementById('mobileMenuBtn')?.addEventListener('click', toggleMobilePanel);
@@ -554,6 +561,11 @@ function setupUI() {
   document.getElementById('mobileDirectionsBtn')?.addEventListener('click', showDirections);
   document.getElementById('mobileStartTime').addEventListener('change', renderMetersForViewport);
   document.getElementById('mobileEndTime').addEventListener('change', renderMetersForViewport);
+  
+  // Mobile filter buttons
+  document.getElementById('mobileShowAllBtn')?.addEventListener('click', () => setFilter('all', true));
+  document.getElementById('mobileShowFreeBtn')?.addEventListener('click', () => setFilter('free', true));
+  document.getElementById('mobileShowPaidBtn')?.addEventListener('click', () => setFilter('paid', true));
 
   // Quick action buttons
   document.getElementById('locationBtn').addEventListener('click', () => useCurrentLocation(isMobileView));
@@ -659,6 +671,32 @@ function getReferenceTime() {
   return timeValue ? new Date(timeValue) : new Date();
 }
 
+function setFilter(filterType, isMobile) {
+  activeFilter = filterType;
+  
+  // Update button states for both desktop and mobile
+  const prefixes = ['', 'mobile'];
+  prefixes.forEach(prefix => {
+    const allBtn = document.getElementById(`${prefix}${prefix ? 'S' : 's'}howAllBtn`);
+    const freeBtn = document.getElementById(`${prefix}${prefix ? 'S' : 's'}howFreeBtn`);
+    const paidBtn = document.getElementById(`${prefix}${prefix ? 'S' : 's'}howPaidBtn`);
+    
+    if (allBtn) allBtn.classList.toggle('active', filterType === 'all');
+    if (freeBtn) freeBtn.classList.toggle('active', filterType === 'free');
+    if (paidBtn) paidBtn.classList.toggle('active', filterType === 'paid');
+  });
+  
+  // Re-render the map with the new filter
+  renderMetersForViewport();
+}
+
+function shouldShowMarker(statusInfo) {
+  if (activeFilter === 'all') return true;
+  if (activeFilter === 'free') return statusInfo.status === 'FREE';
+  if (activeFilter === 'paid') return statusInfo.status === 'PAID';
+  return true;
+}
+
 function renderIndividualMeters(refTime = new Date()) {
   if (!Array.isArray(membersData) || !membersData.length) return;
 
@@ -713,6 +751,12 @@ function renderIndividualMeters(refTime = new Date()) {
     const key = getMemberKey(member);
     const cluster = clusterMap.get(member.cluster_id);
     const statusInfo = getCurrentStatus(cluster?.parsed_schedule, refTime);
+    
+    // Apply filter
+    if (!shouldShowMarker(statusInfo)) {
+      return;
+    }
+    
     const style = STATUS_STYLES[statusInfo.status] || STATUS_STYLES.UNKNOWN;
     const icon = buildMeterIcon(style.color, style.icon);
 
@@ -802,6 +846,12 @@ function renderClusterCentroids(refTime = new Date()) {
   candidates.forEach(({ cluster, position, lat, lng }) => {
     const key = getClusterKey(cluster);
     const statusInfo = getCurrentStatus(cluster.parsed_schedule, refTime);
+    
+    // Apply filter
+    if (!shouldShowMarker(statusInfo)) {
+      return;
+    }
+    
     const style = STATUS_STYLES[statusInfo.status] || STATUS_STYLES.UNKNOWN;
     const icon = buildClusterIcon(style.color, parseInt(cluster.count_meters) || 1);
 
@@ -940,6 +990,15 @@ function handleMeterClick(marker) {
   const startInput = document.getElementById(isMobile ? 'mobileStartTime' : 'startTime');
   const endInput = document.getElementById(isMobile ? 'mobileEndTime' : 'endTime');
 
+  // Store the selected meter data for directions
+  selectedMeterData = data;
+
+  // Enable directions button if we have a destination
+  const directionsBtn = document.getElementById(isMobile ? 'mobileDirectionsBtn' : 'directionsBtn');
+  if (directionsBtn && destinationMarker) {
+    directionsBtn.disabled = false;
+  }
+
   displayParkingResults(data, {
     isMobile,
     distanceMeters: distanceToDestination,
@@ -1012,6 +1071,9 @@ function findNearestParking(isMobile = false) {
 }
 
 function processDestination(destination, destinationName, startTime, endTime, isMobile = false) {
+  // Clear previous selections
+  selectedMeterData = null;
+  
   // Place destination marker
   if (destinationMarker) destinationMarker.setMap(null);
   destinationMarker = new google.maps.Marker({
@@ -1106,6 +1168,9 @@ function displayParkingResults(spot, options = {}) {
   const parkingDetails = document.getElementById(isMobile ? 'mobileParkingDetails' : 'parkingDetails');
   const routeDetails = document.getElementById(isMobile ? 'mobileRouteDetails' : 'routeDetails');
 
+  const refTime = getReferenceTime();
+  const statusInfo = getCurrentStatus(spot.cluster?.parsed_schedule, refTime);
+
   const distanceInfo = (() => {
     if (distanceMeters === null) return '';
     const meters = Math.round(distanceMeters);
@@ -1177,11 +1242,37 @@ function getDirections(parkingSpot, destination, destinationName, isMobile = fal
 }
 
 function showDirections() {
-  if (currentRoute) {
-    directionsRenderer.setDirections(currentRoute);
-    map.fitBounds(currentRoute.routes[0].bounds);
-    showWarning('Walking directions displayed on map.');
+  if (!selectedMeterData || !destinationMarker) {
+    showWarning('Please select a destination and a parking meter first.', 'error');
+    return;
   }
+
+  const destPosition = destinationMarker.getPosition();
+  if (!destPosition) {
+    showWarning('Destination location not available.', 'error');
+    return;
+  }
+
+  const origin = { lat: destPosition.lat(), lng: destPosition.lng() };
+  const destination = { lat: selectedMeterData.lat, lng: selectedMeterData.lng };
+
+  directionsService.route({
+    origin: origin,
+    destination: destination,
+    travelMode: google.maps.TravelMode.WALKING
+  }, (result, status) => {
+    if (status === 'OK') {
+      currentRoute = result;
+      directionsRenderer.setDirections(result);
+      map.fitBounds(result.routes[0].bounds);
+      
+      const leg = result.routes[0].legs[0];
+      showWarning(`Walking directions: ${leg.distance.text} • ${leg.duration.text}`);
+    } else {
+      console.warn('Directions request failed:', status);
+      showWarning('Could not get directions. Please try again.', 'error');
+    }
+  });
 }
 
 function useCurrentLocation(isMobile = false) {
@@ -1257,9 +1348,10 @@ function resetAll(isMobile = false) {
     meterInfoWindow.close();
   }
   
-  // Clear directions
+  // Clear directions and selected meter
   directionsRenderer.set('directions', null);
   currentRoute = null;
+  selectedMeterData = null;
   
   // Reset forms
   const prefix = isMobile ? 'mobile' : '';
