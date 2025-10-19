@@ -1,0 +1,160 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Parking Spot Locator</title>
+  <link rel="stylesheet" href="web-styles.css">
+</head>
+<body>
+  <!-- Google Maps Background -->
+  <div id="map"></div>
+
+  <!-- Quick Action Buttons -->
+  <div class="quick-actions">
+    <button class="quick-btn" id="locationBtn" title="Use my location">📍</button>
+    <button class="quick-btn" id="refreshBtn" title="Refresh parking spots">🔄</button>
+  </div>
+
+  <!-- Desktop Sidebar Control Panel -->
+  <div id="controlPanel" class="desktop-sidebar">
+    <div id="panelHeader">
+      <h1>🅿️ Parking Locator</h1>
+      <div class="subtitle">Find the nearest available parking spot</div>
+      <button id="toggleSidebar" class="toggle-btn">◀</button>
+    </div>
+    
+    <div id="panelContent">
+      <form id="parkingForm">
+        <div class="form-group">
+          <label for="destinationInput">📍 Destination</label>
+          <input type="text" id="destinationInput" class="form-control" 
+                 placeholder="Enter your destination address..." />
+        </div>
+
+        <div class="form-group">
+          <label>⏰ Parking Duration</label>
+          <div class="time-row">
+            <div>
+              <label for="startTime" class="time-label">Start Time</label>
+              <input type="datetime-local" id="startTime" class="form-control" />
+            </div>
+            <div>
+              <label for="endTime" class="time-label">End Time</label>
+              <input type="datetime-local" id="endTime" class="form-control" />
+            </div>
+          </div>
+        </div>
+
+        <div class="button-group">
+          <button type="button" id="findParkingBtn" class="btn btn-primary">
+            🔍 Find Parking
+          </button>
+          <button type="button" id="useLocationBtn" class="btn btn-location">
+            📱 My Location
+          </button>
+          <button type="button" id="resetBtn" class="btn btn-reset">
+            🗑️ Clear
+          </button>
+          <button type="button" id="directionsBtn" class="btn btn-secondary" disabled>
+            🧭 Directions
+          </button>
+        </div>
+      </form>
+
+      <!-- Results Panel -->
+      <div id="resultsPanel">
+        <div class="result-header">🎯 Nearest Parking Spot</div>
+        <div id="parkingDetails"></div>
+        <div id="routeDetails"></div>
+      </div>
+
+      <!-- Legend -->
+      <div class="legend">
+        <h4>Map Legend</h4>
+        <div class="legend-item">
+          <span class="legend-icon">🔵</span>
+          <span>Your destination</span>
+        </div>
+        <div class="legend-item">
+          <span class="legend-icon">🅿️</span>
+          <span>Available parking spots</span>
+        </div>
+        <div class="legend-item">
+          <span class="legend-icon">⭐</span>
+          <span>Recommended spot</span>
+        </div>
+        <div class="legend-item">
+          <span class="legend-icon">🚗</span>
+          <span>Walking route</span>
+        </div>
+        <div class="legend-divider"></div>
+        <h4>Meter Cap Colours</h4>
+        <div id="colorKey" class="color-key"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Top Navigation Bar for Mobile -->
+  <div id="mobileHeader">
+    <h1>🅿️ Parking Locator</h1>
+    <button id="mobileMenuBtn">☰</button>
+  </div>
+
+  <!-- Mobile Bottom Panel (hidden on desktop) -->
+  <div id="mobilePanel">
+    <div id="mobilePanelContent">
+      <!-- Same content as desktop sidebar -->
+      <form id="mobileParkingForm">
+        <div class="form-group">
+          <label for="mobileDestinationInput">📍 Destination</label>
+          <input type="text" id="mobileDestinationInput" class="form-control" 
+                 placeholder="Enter your destination address..." />
+        </div>
+
+        <div class="form-group">
+          <label>⏰ Parking Duration</label>
+          <div class="time-row mobile-time-row">
+            <div>
+              <label for="mobileStartTime" class="time-label">Start Time</label>
+              <input type="datetime-local" id="mobileStartTime" class="form-control" />
+            </div>
+            <div>
+              <label for="mobileEndTime" class="time-label">End Time</label>
+              <input type="datetime-local" id="mobileEndTime" class="form-control" />
+            </div>
+          </div>
+        </div>
+
+        <div class="mobile-button-group">
+          <button type="button" id="mobileFindParkingBtn" class="btn btn-primary">
+            🔍 Find Parking
+          </button>
+          <button type="button" id="mobileUseLocationBtn" class="btn btn-location">
+            📱 My Location
+          </button>
+          <button type="button" id="mobileResetBtn" class="btn btn-reset">
+            🗑️ Clear
+          </button>
+          <button type="button" id="mobileDirectionsBtn" class="btn btn-secondary" disabled>
+            🧭 Directions
+          </button>
+        </div>
+      </form>
+
+      <!-- Mobile Results Panel -->
+      <div id="mobileResultsPanel">
+        <div class="result-header">🎯 Nearest Parking Spot</div>
+        <div id="mobileParkingDetails"></div>
+        <div id="mobileRouteDetails"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Warning/Status Messages -->
+  <div id="warning"></div>
+
+  <!-- JavaScript -->
+  <script src="web-app.js"></script>
+</body>
+</html>

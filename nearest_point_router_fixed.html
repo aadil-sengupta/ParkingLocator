@@ -1,0 +1,290 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Nearest Point Router — Google Maps (Fixed)</title>
+  <style>
+    html, body { height: 100%; margin: 0; padding: 0; font-family: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif; }
+    #map { position: absolute; top: 64px; bottom: 0; left: 0; right: 0; }
+    #controls {
+      position: fixed; top: 8px; left: 50%; transform: translateX(-50%);
+      display: flex; gap: 8px; align-items: center; background: #ffffff; padding: 8px 10px;
+      border-radius: 12px; box-shadow: 0 6px 20px rgba(0,0,0,0.15); z-index: 2;
+      width: min(900px, calc(100% - 16px));
+    }
+    #searchInput { flex: 1; height: 40px; padding: 0 12px; border-radius: 10px; border: 1px solid #e2e8f0; outline: none; font-size: 14px; }
+    #goBtn, #locBtn, #resetBtn {
+      height: 40px; border: none; padding: 0 12px; border-radius: 10px; cursor: pointer; font-weight: 600;
+      background: #111827; color: #fff;
+    }
+    #locBtn { background: #2563eb; }
+    #resetBtn { background: #6b7280; }
+    #panel {
+      position: fixed; right: 10px; top: 64px; width: 320px; max-width: calc(100% - 20px);
+      background: #fff; border-radius: 12px; box-shadow: 0 6px 20px rgba(0,0,0,0.15); padding: 12px; z-index: 2;
+      max-height: calc(100% - 84px); overflow: auto;
+    }
+    #panel h3 { margin: 6px 0 8px; font-size: 16px; }
+    #panel .metric { font-size: 13px; color: #374151; margin-bottom: 8px; }
+    #legend { font-size: 12px; color: #4b5563; }
+    .badge { display: inline-block; padding: 2px 6px; border-radius: 999px; background: #eef2ff; color: #3730a3; font-size: 11px; margin-left: 6px; }
+
+    #warning {
+      position: fixed; left: 10px; bottom: 10px; right: 10px; background: #fff7ed; color: #9a3412;
+      border: 1px solid #fed7aa; border-radius: 10px; padding: 10px; font-size: 13px; display: none; z-index: 3;
+    }
+    @media (max-width: 760px){
+      #panel { width: calc(100% - 20px); left: 10px; right: 10px; top: auto; bottom: 56px; }
+      #map { top: 112px; }
+      #controls { flex-wrap: wrap; gap: 6px; }
+      #goBtn, #locBtn, #resetBtn { flex: 1; }
+    }
+  </style>
+</head>
+<body>
+  <div id="controls">
+    <input id="searchInput" type="text" placeholder="Search an address or place (Autocomplete optional)" />
+    <button id="goBtn" title="Route to nearest point">Route</button>
+    <button id="locBtn" title="Use current location">Use my location</button>
+    <button id="resetBtn" title="Clear route">Reset</button>
+  </div>
+  <div id="panel" aria-live="polite">
+    <h3>Nearest Point Router <span class="badge">Fixed</span></h3>
+    <div class="metric">Enter an address above. We'll find the nearest point from your list and show the route.</div>
+    <div id="nearestInfo" class="metric"></div>
+    <div id="dirSummary"></div>
+    <div id="legend">
+      <p><strong>Legend</strong></p>
+      <ul>
+        <li>🔵 Your origin</li>
+        <li>📍 Candidate points</li>
+        <li>⭐ Nearest point</li>
+      </ul>
+    </div>
+  </div>
+  <div id="map"></div>
+  <div id="warning"></div>
+
+  <script>
+    // ========== CONFIG ==========
+    const GOOGLE_MAPS_API_KEY = "AIzaSyB7xkjnU8eFJhZ3G45_Wa6-QHay6XoGQYQ"; // user's key inserted
+    // Pre-parsed DMS coordinate "37°47'15.4"N 122°23'22.9"W" -> 37.787611, -122.389694
+    const POINTS = [
+      { lat: 37.787611, lng: -122.389694, label: "DMS 37°47'15.4\"N 122°23'22.9\"W" },
+      { lat: 37.78714973847698, lng: -122.38895764131333 },
+      { lat: 37.78798284272779, lng: -122.3903752246279 },
+      { lat: 37.787575251559176, lng: -122.39086373371947 },
+      { lat: 37.78824549674944, lng: -122.39015348697146 },
+      { lat: 37.788693190606075, lng: -122.38951781636143 },
+      { lat: 37.78856250562458, lng: -122.39268586605012 },
+      { lat: 37.78823813516505, lng: -122.39228924675083 },
+      { lat: 37.78797290964031, lng: -122.3919625291102 },
+      { lat: 37.787773412217476, lng: -122.39175451227223 },
+      { lat: 37.7875636094676, lng: -122.39148822788431 },
+      { lat: 37.7872310969264, lng: -122.39104359812214 },
+      { lat: 37.78679959143184, lng: -122.39043528822279 },
+      { lat: 37.78635273681646, lng: -122.3899559030742 },
+      { lat: 37.78677162951609, lng: -122.39043918674045 },
+      { lat: 37.78648442444194, lng: -122.38981321574244 },
+      { lat: 37.78599924578022, lng: -122.3894628869732 },
+      { lat: 37.785616349328635, lng: -122.38899503170997 },
+      { lat: 37.78584482441492, lng: -122.38909032186866 },
+      { lat: 37.785939712230316, lng: -122.39000982356924 },
+      { lat: 37.78579610925144, lng: -122.39025437327086 },
+      { lat: 37.78549806487167, lng: -122.39063899983988 },
+      { lat: 37.78522518410034, lng: -122.3909327427608 },
+      { lat: 37.784934098375345, lng: -122.39120466949154 },
+      { lat: 37.78457998792669, lng: -122.39160834065879 },
+      { lat: 37.784505355078196, lng: -122.39167019158427 },
+      { lat: 37.78422180668654, lng: -122.39201276353712 },
+      { lat: 37.7861628727249, lng: -122.39276936560829 },
+      { lat: 37.78635074493539, lng: -122.39247943018246 },
+      { lat: 37.786576955637145, lng: -122.39217159248098 },
+      { lat: 37.785392418466635, lng: -122.39060981213525 },
+      { lat: 37.78512814564785, lng: -122.39093042226605 },
+      { lat: 37.78486037173207, lng: -122.39119875837616 },
+      { lat: 37.78461252818696, lng: -122.39123549106552 },
+      { lat: 37.78441571567043, lng: -122.39097131717013 },
+      { lat: 37.7842559576522, lng: -122.39073217073373 },
+      { lat: 37.78413452906874, lng: -122.39058039038203 },
+      { lat: 37.78382463886395, lng: -122.3902088129869 },
+      { lat: 37.7837392380865, lng: -122.39010537785661 },
+      { lat: 37.78346820172625, lng: -122.39005912438934 },
+      { lat: 37.78319158942457, lng: -122.39040166206787 },
+      { lat: 37.78270282481382, lng: -122.39100414510838 },
+      { lat: 37.78229027088623, lng: -122.39096618652658 },
+      { lat: 37.781948747088535, lng: -122.39051271145233 },
+      { lat: 37.78166295056506, lng: -122.3901435203484 },
+      { lat: 37.781350687800746, lng: -122.38983313433334 },
+      { lat: 37.78147985710769, lng: -122.38952171329784 },
+      { lat: 37.78171748846637, lng: -122.38922448646902 },
+      { lat: 37.78185136699541, lng: -122.38878031611837 },
+      { lat: 37.78220572706739, lng: -122.3933763572693 },
+      { lat: 37.78179651742893, lng: -122.39401989287452 },
+      { lat: 37.78190223680859, lng: -122.3932340381819 },
+      { lat: 37.781531402878, lng: -122.39373548990595 },
+      { lat: 37.78156111752594, lng: -122.39426222847207 },
+      { lat: 37.78130392263273, lng: -122.39458601452627 },
+      { lat: 37.78111102696761, lng: -122.39474382474799 },
+      { lat: 37.78103796795151, lng: -122.3945336993364 },
+      { lat: 37.78139407332427, lng: -122.39396572072336 },
+      { lat: 37.781382431738706, lng: -122.39369299813546 },
+      { lat: 37.781124302827116, lng: -122.39336630000719 },
+      { lat: 37.78188738459425, lng: -122.39428729507135 },
+      { lat: 37.78207526259701, lng: -122.39453152837966 },
+      { lat: 37.78079355300332, lng: -122.39619566831993 },
+      { lat: 37.78022326821828, lng: -122.3955698023666 },
+      { lat: 37.779839585438154, lng: -122.39513580079104 }
+    ];
+
+    let map, autocomplete, directionsService, directionsRenderer;
+    let originMarker = null;
+    let pointMarkers = [];
+    let nearestMarker = null;
+
+    function showWarning(msg) { const el = document.getElementById('warning'); el.textContent = msg; el.style.display = 'block'; }
+
+    function haversine(a, b) {
+      const R = 6371000;
+      const toRad = d => d * Math.PI / 180;
+      const dLat = toRad(b.lat - a.lat);
+      const dLng = toRad(b.lng - a.lng);
+      const lat1 = toRad(a.lat);
+      const lat2 = toRad(b.lat);
+      const h = Math.sin(dLat/2)**2 + Math.cos(lat1)*Math.cos(lat2)*Math.sin(dLng/2)**2;
+      return 2 * R * Math.asin(Math.sqrt(h));
+    }
+
+    function initMap() {
+      try {
+        map = new google.maps.Map(document.getElementById('map'), { center: { lat: 37.7876, lng: -122.3897 }, zoom: 16 });
+        directionsService = new google.maps.DirectionsService();
+        directionsRenderer = new google.maps.DirectionsRenderer({ map });
+        placePoints();
+        setupUI();
+      } catch (e) {
+        showWarning('Google Maps failed to initialize. Check your API key and browser console.');
+        console.error(e);
+      }
+    }
+
+    function setupUI() {
+      const input = document.getElementById('searchInput');
+      try {
+        // Try to enable Places Autocomplete (requires Places API)
+        autocomplete = new google.maps.places.Autocomplete(input, { fields: ['geometry','name','formatted_address'], componentRestrictions: { country: ['us'] } });
+        autocomplete.bindTo('bounds', map);
+      } catch (e) {
+        console.warn('Places Autocomplete unavailable (Places API not enabled?). Falling back to raw text geocoding.');
+      }
+
+      document.getElementById('goBtn').addEventListener('click', () => {
+        const place = autocomplete && autocomplete.getPlace ? autocomplete.getPlace() : null;
+        if (place && place.geometry) {
+          const origin = { lat: place.geometry.location.lat(), lng: place.geometry.location.lng() };
+          routeToNearest(origin, place.formatted_address || place.name || 'Origin');
+        } else {
+          const geocoder = new google.maps.Geocoder();
+          geocoder.geocode({ address: input.value }, (results, status) => {
+            if (status === 'OK' && results[0]) {
+              const loc = results[0].geometry.location;
+              const origin = { lat: loc.lat(), lng: loc.lng() };
+              routeToNearest(origin, results[0].formatted_address);
+            } else {
+              showWarning('Address not found. If you typed free text, click a suggestion, or enable the Places + Geocoding APIs.');
+            }
+          });
+        }
+      });
+
+      document.getElementById('locBtn').addEventListener('click', () => {
+        if (navigator.geolocation) {
+          navigator.geolocation.getCurrentPosition(pos => {
+            const origin = { lat: pos.coords.latitude, lng: pos.coords.longitude };
+            routeToNearest(origin, 'My Location');
+          }, err => showWarning('Could not get your location: ' + err.message));
+        } else showWarning('Geolocation not supported by your browser.');
+      });
+
+      document.getElementById('resetBtn').addEventListener('click', () => {
+        directionsRenderer.set('directions', null);
+        if (originMarker) { originMarker.setMap(null); originMarker = null; }
+        if (nearestMarker) { nearestMarker.setMap(null); nearestMarker = null; }
+        document.getElementById('nearestInfo').textContent = '';
+        document.getElementById('dirSummary').innerHTML = '';
+        document.getElementById('warning').style.display = 'none';
+      });
+    }
+
+    function placePoints() {
+      const bounds = new google.maps.LatLngBounds();
+      POINTS.forEach((p, idx) => {
+        const m = new google.maps.Marker({
+          position: p, map,
+          title: p.label ? p.label : 'Point #' + (idx + 1),
+          icon: { path: google.maps.SymbolPath.CIRCLE, scale: 5, fillColor: '#1d4ed8', fillOpacity: 0.9, strokeColor: '#0f172a', strokeWeight: 1 }
+        });
+        pointMarkers.push(m);
+        bounds.extend(m.getPosition());
+      });
+      map.fitBounds(bounds);
+    }
+
+    function routeToNearest(origin, originLabel) {
+      if (!originMarker) {
+        originMarker = new google.maps.Marker({
+          position: origin, map, title: originLabel || 'Origin',
+          icon: 'https://maps.google.com/mapfiles/ms/icons/blue-dot.png'
+        });
+      } else {
+        originMarker.setPosition(origin);
+        originMarker.setTitle(originLabel || 'Origin');
+      }
+
+      let best = null, bestIdx = -1, bestDist = Infinity;
+      POINTS.forEach((p, idx) => {
+        const d = haversine(origin, p);
+        if (d < bestDist) { best = p; bestIdx = idx; bestDist = d; }
+      });
+      if (!best) return showWarning('No candidate points available.');
+
+      if (nearestMarker) nearestMarker.setMap(null);
+      nearestMarker = new google.maps.Marker({
+        position: best, map, title: (best.label ? best.label + ' — ' : '') + 'Nearest point',
+        icon: 'https://maps.google.com/mapfiles/kml/paddle/ylw-stars.png'
+      });
+
+      const meters = bestDist, feet = meters * 3.28084;
+      document.getElementById('nearestInfo').innerHTML =
+        `Nearest point: <strong>${best.label || ('Point #' + (bestIdx + 1))}</strong><br/>
+         Straight-line distance: <strong>${meters.toFixed(0)} m</strong> (${feet.toFixed(0)} ft)`;
+
+      // Request route (requires Directions API enabled)
+      directionsService.route({
+        origin, destination: best, travelMode: google.maps.TravelMode.DRIVING
+      }, (result, status) => {
+        if (status === 'OK' && result) {
+          directionsRenderer.setDirections(result);
+          const leg = result.routes[0].legs[0];
+          document.getElementById('dirSummary').innerHTML =
+            `<p><strong>Route:</strong> ${originLabel} → ${best.label || ('Point #' + (bestIdx + 1))}</p>
+             <p><strong>Drive:</strong> ${leg.distance.text}, ${leg.duration.text}</p>`;
+          map.fitBounds(result.routes[0].bounds);
+        } else {
+          showWarning('Directions request failed: ' + status + '. Make sure the Directions API is enabled and your key allows this referrer.');
+        }
+      });
+    }
+
+    // Async load of Maps JS API with Places (won't break if Places not enabled)
+    (function loadGoogleMaps(){
+      const s = document.createElement('script');
+      s.src = `https://maps.googleapis.com/maps/api/js?key=${encodeURIComponent(GOOGLE_MAPS_API_KEY)}&libraries=places&callback=initMap`;
+      s.async = true; s.defer = true;
+      s.onerror = () => showWarning('Failed to load Google Maps API. Check your network or API key.');
+      document.head.appendChild(s);
+    })();
+  </script>
+</body>
+</html>
