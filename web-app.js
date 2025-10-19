@@ -287,8 +287,8 @@ function getMarkerColor(capColorDisplay) {
   return color;
 }
 
-function buildMeterInfoContent(data) {
-  const statusInfo = getCurrentStatus(data.cluster?.parsed_schedule);
+function buildMeterInfoContent(data, refTime = new Date()) {
+  const statusInfo = getCurrentStatus(data.cluster?.parsed_schedule, refTime);
   const location = formatMeterLocation(data);
   const scheduleHtml = data.cluster?.parsed_schedule 
     ? `<div class="meter-info-row"><strong>Schedule:</strong>${formatClusterSchedule(data.cluster.parsed_schedule, 'details')}</div>`
@@ -309,7 +309,7 @@ function buildMeterInfoContent(data) {
   `;
 }
 
-function buildClusterInfoContent(cluster) {
+function buildClusterInfoContent(cluster, refTime = new Date()) {
   const scheduleHtml = cluster.parsed_schedule 
     ? formatClusterSchedule(cluster.parsed_schedule, 'details')
     : 'Schedule not available';
@@ -916,8 +916,9 @@ function handleMeterClick(marker) {
   const data = marker.meterData;
   if (!data) return;
 
+  const refTime = getReferenceTime();
   if (meterInfoWindow) {
-    meterInfoWindow.setContent(buildMeterInfoContent(data));
+    meterInfoWindow.setContent(buildMeterInfoContent(data, refTime));
     meterInfoWindow.open(map, marker);
   }
 
@@ -954,8 +955,9 @@ function handleClusterClick(marker) {
   const cluster = marker.clusterData;
   if (!cluster) return;
 
+  const refTime = getReferenceTime();
   if (clusterInfoWindow) {
-    clusterInfoWindow.setContent(buildClusterInfoContent(cluster));
+    clusterInfoWindow.setContent(buildClusterInfoContent(cluster, refTime));
     clusterInfoWindow.open(map, marker);
   }
 
